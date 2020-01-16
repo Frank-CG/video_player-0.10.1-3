@@ -260,10 +260,10 @@ public class VideoPlayerPlugin implements MethodCallHandler {
         TrackGroup group = trackGroups.get(groupIndex);
         for (int trackIndex = 0; trackIndex < group.length; trackIndex++) {
 
-          if (group.getFormat(trackIndex).language != null && group.getFormat(trackIndex).label != null) {
+          if (group.getFormat(trackIndex).language != null /*&& group.getFormat(trackIndex).label != null*/) {
             Map<String,Object> raw = new HashMap<String,Object>();
             raw.put("language", group.getFormat(trackIndex).language);
-            raw.put("label", group.getFormat(trackIndex).label);
+            raw.put("label", group.getFormat(trackIndex).label == null ? group.getFormat(trackIndex).language : group.getFormat(trackIndex).label);
             raw.put("trackIndex", trackIndex);
             raw.put("groupIndex", groupIndex);
             raw.put("renderIndex", rendererIndex);
