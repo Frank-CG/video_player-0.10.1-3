@@ -33,6 +33,7 @@ int64_t FLTCMTimeToMillis(CMTime time) {
 @interface FLTVideoPlayer : NSObject <FlutterTexture, FlutterStreamHandler>
 @property(readonly, nonatomic) AVPlayer* player;
 @property(readonly, nonatomic) AVPlayerItemVideoOutput* videoOutput;
+@property(readonly, nonatomic) AVPlayerItemLegibleOutput* legibleOutput;
 @property(readonly, nonatomic) CADisplayLink* displayLink;
 @property(nonatomic) FlutterEventChannel* eventChannel;
 @property(nonatomic) FlutterEventSink eventSink;
@@ -41,11 +42,15 @@ int64_t FLTCMTimeToMillis(CMTime time) {
 @property(nonatomic, readonly) bool isPlaying;
 @property(nonatomic) bool isLooping;
 @property(nonatomic, readonly) bool isInitialized;
+@property(nonatomic) NSMutableArray* trackOptions;
+@property(nonatomic) NSMutableArray* trackGroups;
+
 - (instancetype)initWithURL:(NSURL*)url frameUpdater:(FLTFrameUpdater*)frameUpdater;
 - (void)play;
 - (void)pause;
 - (void)setIsLooping:(bool)isLooping;
 - (void)updatePlayingState;
+- (void)setSubtitles:(int)optionIndex groupIndex:(int)groupIndex;
 @end
 
 static void* timeRangeContext = &timeRangeContext;
@@ -157,6 +162,8 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
 
 - (instancetype)initWithURL:(NSURL*)url frameUpdater:(FLTFrameUpdater*)frameUpdater {
   AVPlayerItem* item = [AVPlayerItem playerItemWithURL:url];
+  self.trackOptions = [NSMutableArray array];
+  self.trackGroups = [NSMutableArray array];
   return [self initWithPlayerItem:item frameUpdater:frameUpdater];
 }
 
@@ -190,13 +197,33 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
   _isPlaying = false;
   _disposed = false;
 
+
   AVAsset* asset = [item asset];
+
+  NSLog(@"initWithPlayerItem testing");
+  NSLog(@"%i",[asset.availableMediaCharacteristicsWithMediaSelectionOptions count]);
+  /*Begin:Just for developing*/
+  for (AVMediaCharacteristic characteristic in asset.availableMediaCharacteristicsWithMediaSelectionOptions) {
+    NSLog(@"%@", characteristic);
+    AVMediaSelectionGroup* group = [asset mediaSelectionGroupForMediaCharacteristic:characteristic];
+    if(group != nil){
+      for (AVMediaSelectionOption* option in group.options) {
+        NSLog(@"  Option: %@", option.displayName);
+      }
+    }
+  }
+  /*Ended:Just for developing*/
+
   void (^assetCompletionHandler)(void) = ^{
-    if ([asset statusOfValueForKey:@"tracks" error:nil] == AVKeyValueStatusLoaded) {
+    if ([asset statusOfValueForKey:@"playable" error:nil] == AVKeyValueStatusLoaded) {
+      NSArray* allTracks = [asset tracks];
+      NSLog(@"all tracks: %@, count=%lu",allTracks, [asset.tracks count]);
       NSArray* tracks = [asset tracksWithMediaType:AVMediaTypeVideo];
+      NSLog(@"tracks-count: %lu",[tracks count]);
       if ([tracks count] > 0) {
         AVAssetTrack* videoTrack = tracks[0];
         void (^trackCompletionHandler)(void) = ^{
+          NSLog(@"trackCompletionHandler is called.");
           if (self->_disposed) return;
           if ([videoTrack statusOfValueForKey:@"preferredTransform"
                                         error:nil] == AVKeyValueStatusLoaded) {
@@ -215,18 +242,28 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
         };
         [videoTrack loadValuesAsynchronouslyForKeys:@[ @"preferredTransform" ]
                                   completionHandler:trackCompletionHandler];
+
+        AVAssetTrack* ccTrack = tracks[2];
+        NSLog(@"ccTracks: %@",ccTrack);
+        void (^cctrackCompletionHandler)(void) = ^{
+          NSLog(@"cctrackCompletionHandler is called.");
+          return;
+        };
+        [ccTrack loadValuesAsynchronouslyForKeys:@[ @"readable" ]
+                                  completionHandler:cctrackCompletionHandler];
       }
     }
   };
 
   _player = [AVPlayer playerWithPlayerItem:item];
   _player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
+  _player.appliesMediaSelectionCriteriaAutomatically = false;
 
   [self createVideoOutputAndDisplayLink:frameUpdater];
 
   [self addObservers:item];
 
-  [asset loadValuesAsynchronouslyForKeys:@[ @"tracks" ] completionHandler:assetCompletionHandler];
+  [asset loadValuesAsynchronouslyForKeys:@[ @"playable" ] completionHandler:assetCompletionHandler];
 
   return self;
 }
@@ -262,6 +299,7 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
       case AVPlayerItemStatusReadyToPlay:
         [item addOutput:_videoOutput];
         [self sendInitialized];
+        [self getSubtitles];
         [self updatePlayingState];
         break;
     }
@@ -320,8 +358,54 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
   }
 }
 
+- (void)getSubtitles {
+  NSMutableArray<NSDictionary*>* values = [[NSMutableArray alloc] init];
+  NSLog(@"getSubtitles");
+  if (_eventSink && _isInitialized) {
+    AVPlayerItem* item = [self.player currentItem];
+    AVAsset* asset = [item asset];
+    AVMediaSelectionGroup* group = [asset mediaSelectionGroupForMediaCharacteristic:AVMediaCharacteristicLegible];
+    int groupIndex = 0;
+    if(group != nil){
+      [self.trackGroups removeAllObjects];
+      [self.trackOptions removeAllObjects];
+      [self.trackGroups addObject:group];
+      int optionIndex = 0;
+      for (AVMediaSelectionOption* option in group.options) {
+        NSLog(@"  Option: %@", option.displayName);
+        [self.trackOptions addObject:option];
+        NSDictionary* row = @{
+          @"language": option.displayName,
+          @"label": option.displayName,
+          @"trackIndex": [NSNumber numberWithInt:optionIndex],
+          @"groupIndex": [NSNumber numberWithInt:groupIndex],
+          @"renderIndex": [NSNumber numberWithInt:-1],
+        };
+        [values addObject:row];
+        optionIndex++;
+      }
+      _eventSink(@{
+        @"event" : @"subtitleList",
+        @"values" : values
+      });
+    }
+  }
+}
+
+- (void)setSubtitles:(int)optionIndex groupIndex:(int)groupIndex {
+  NSLog(@"setSubtitles: optionIndex=%i, groupIndex=%i", optionIndex, groupIndex);
+  NSLog(@"trackOptions-count=%lu,trackGroups-count=%lu",(unsigned long)[self.trackOptions count],(unsigned long)[self.trackGroups count]);
+  
+  if(optionIndex < [self.trackOptions count] && groupIndex < [self.trackGroups count]){
+    [_player.currentItem selectMediaOption:self.trackOptions[optionIndex] inMediaSelectionGroup:self.trackGroups[groupIndex]];
+    NSLog(@"subtitle selected: %@", self.trackOptions[optionIndex]);
+    _player.closedCaptionDisplayEnabled = true;
+  }
+}
+
 - (void)play {
   _isPlaying = true;
+  NSLog(@"current: %@",_player.currentItem.currentMediaSelection);
   [self updatePlayingState];
 }
 
@@ -503,6 +587,9 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
       result(nil);
     } else if ([@"pause" isEqualToString:call.method]) {
       [player pause];
+      result(nil);
+    } else if ([@"setSubtitles" isEqualToString:call.method]) {
+      [player setSubtitles:[argsMap[@"trackIndex"] intValue] groupIndex:[argsMap[@"groupIndex"] intValue]];
       result(nil);
     } else {
       result(FlutterMethodNotImplemented);
